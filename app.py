@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -26,6 +27,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
+import feedparser
+from urllib.parse import quote_plus
 
 
 # =========================================================
@@ -140,6 +143,129 @@ def fetch_stock(ticker: str, period: str = "1y") -> StockData:
         news = []
 
     return StockData(ticker=ticker, info=info, hist=hist, news=news)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _parse_feed_time(entry) -> Optional[datetime]:
+    """Transforme la date RSS en datetime UTC si possible."""
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        try:
+            return datetime.fromtimestamp(time.mktime(parsed), tz=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_google_news_rss(ticker: str, company_name: str = "", max_age_hours: int = 24) -> List[Dict]:
+    """Récupère des news via Google News RSS, puis filtre localement par fraîcheur.
+    Par défaut : uniquement les articles des dernières 24h.
+    Si aucun article récent n'existe, l'app affichera zéro news plutôt que d'afficher de vieilles news.
+    """
+    ticker = ticker.strip().upper()
+    company_name = (company_name or "").strip()
+
+    # On ajoute when:1d/3d/7d dans la requête, puis on refiltre nous-mêmes par date RSS.
+    if max_age_hours <= 24:
+        when_filter = "when:1d"
+    elif max_age_hours <= 72:
+        when_filter = "when:3d"
+    else:
+        when_filter = "when:7d"
+
+    if company_name and company_name.upper() != ticker:
+        query = f'("{company_name}" OR {ticker}) stock OR earnings OR revenue OR shares {when_filter}'
+    else:
+        query = f'{ticker} stock OR earnings OR revenue OR shares {when_filter}'
+
+    url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+    parsed = feedparser.parse(url)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    results = []
+
+    for entry in parsed.entries[:30]:
+        published_dt = _parse_feed_time(entry)
+
+        # Filtre anti-vieilles news : si la date est absente ou trop ancienne, on n'affiche pas.
+        if published_dt is None or published_dt < cutoff:
+            continue
+
+        age_hours = (datetime.now(timezone.utc) - published_dt).total_seconds() / 3600
+
+        results.append({
+            "title": entry.get("title", "Sans titre"),
+            "publisher": entry.get("source", {}).get("title", "Google News"),
+            "link": entry.get("link", ""),
+            "published": published_dt.strftime("%d/%m/%Y %H:%M UTC"),
+            "published_dt": published_dt.isoformat(),
+            "age_hours": age_hours,
+            "source_type": "Google News RSS",
+        })
+
+    results.sort(key=lambda x: x.get("published_dt", ""), reverse=True)
+    return results
+
+
+def normalize_yfinance_news(news: List[Dict], max_age_hours: int = 24) -> List[Dict]:
+    """Uniformise les news yfinance et filtre les anciennes news."""
+    out = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+
+    for item in news or []:
+        content = item.get("content") if isinstance(item.get("content"), dict) else {}
+        title = item.get("title") or content.get("title") or "Sans titre"
+        publisher = item.get("publisher") or content.get("provider", {}).get("displayName") or "Yahoo Finance"
+        link = item.get("link") or content.get("canonicalUrl", {}).get("url") or ""
+        ts = item.get("providerPublishTime") or content.get("pubDate")
+
+        published_dt = None
+        if isinstance(ts, (int, float)):
+            try:
+                published_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            except Exception:
+                published_dt = None
+        elif isinstance(ts, str):
+            try:
+                # Yahoo peut renvoyer une date ISO avec Z.
+                published_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except Exception:
+                published_dt = None
+
+        if published_dt is None or published_dt < cutoff:
+            continue
+
+        age_hours = (datetime.now(timezone.utc) - published_dt).total_seconds() / 3600
+        out.append({
+            "title": title,
+            "publisher": publisher,
+            "link": link,
+            "published": published_dt.strftime("%d/%m/%Y %H:%M UTC"),
+            "published_dt": published_dt.isoformat(),
+            "age_hours": age_hours,
+            "source_type": "Yahoo/yfinance",
+        })
+    return out
+
+
+def get_combined_news(ticker: str, company_name: str, yfinance_news: List[Dict], max_age_hours: int = 24) -> List[Dict]:
+    """Combine yfinance + Google News RSS, filtre par fraîcheur, retire les doublons et trie du plus récent au plus ancien."""
+    combined = []
+    combined.extend(normalize_yfinance_news(yfinance_news, max_age_hours=max_age_hours))
+    combined.extend(fetch_google_news_rss(ticker, company_name, max_age_hours=max_age_hours))
+
+    seen = set()
+    unique = []
+    for item in combined:
+        key = (item.get("title") or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+
+    unique.sort(key=lambda x: x.get("published_dt", ""), reverse=True)
+    return unique[:12]
 
 
 # =========================================================
@@ -556,7 +682,7 @@ def analyze_ticker(ticker: str) -> Dict:
         "country": info.get("country"),
         "info": info,
         "hist": data.hist,
-        "news": data.news,
+        "news": get_combined_news(data.ticker, info.get("longName") or info.get("shortName") or data.ticker, data.news, max_age_hours=24),
         "metrics": metrics,
         "fund_score": fund_score,
         "fund_verdict": fund_verdict,
@@ -603,27 +729,24 @@ def plot_price_chart(hist: pd.DataFrame, ticker: str):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def show_news(news: List[Dict], max_items: int = 5):
+def show_news(news: List[Dict], max_items: int = 8):
     if not news:
-        st.info("Pas de news disponibles via yfinance pour ce ticker.")
+        st.info("Pas de news trouvées pour ce ticker. Essaie avec le nom complet de l'entreprise ou vérifie le ticker.")
         return
 
     for item in news[:max_items]:
         title = item.get("title") or "Sans titre"
         publisher = item.get("publisher") or "Source inconnue"
         link = item.get("link") or ""
-        ts = item.get("providerPublishTime")
-        date_str = ""
-        if ts:
-            try:
-                date_str = datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M")
-            except Exception:
-                date_str = ""
+        published = item.get("published") or ""
+        source_type = item.get("source_type") or "News"
+
         if link:
-            st.markdown(f"**[{title}]({link})**  ")
+            st.markdown(f"**[{title}]({link})**")
         else:
             st.markdown(f"**{title}**")
-        st.caption(f"{publisher} {date_str}")
+
+        st.caption(f"{publisher} · {source_type} · {published}")
         st.divider()
 
 
@@ -941,3 +1064,4 @@ with learn_tab:
 # pandas
 # numpy
 # plotly
+# feedparser
