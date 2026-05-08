@@ -1389,16 +1389,15 @@ def watchlist_manager_ui(current_tickers: str = ""):
                     st.error("Entre au moins un ticker.")
                 else:
                     st.session_state.builder_tickers = unique_tickers(st.session_state.builder_tickers + new_items)
-                    st.session_state.selected_watchlist = "🧺 Liste en cours"
-                    st.session_state.tickers_text = tickers_to_text(st.session_state.builder_tickers)
-                    st.session_state.ticker_to_add = ""
+                    st.session_state.pending_selected_watchlist = "🧺 Liste en cours"
+                    st.session_state.pending_tickers_text = tickers_to_text(st.session_state.builder_tickers)
                     st.success("Ticker ajouté à ta liste en cours.")
                     st.rerun()
 
         if st.button("📌 Ajouter la liste affichée à ma liste en cours", use_container_width=True):
             st.session_state.builder_tickers = unique_tickers(st.session_state.builder_tickers + parse_tickers(current_tickers))
-            st.session_state.selected_watchlist = "🧺 Liste en cours"
-            st.session_state.tickers_text = tickers_to_text(st.session_state.builder_tickers)
+            st.session_state.pending_selected_watchlist = "🧺 Liste en cours"
+            st.session_state.pending_tickers_text = tickers_to_text(st.session_state.builder_tickers)
             st.rerun()
 
         if st.session_state.builder_tickers:
@@ -1413,14 +1412,14 @@ def watchlist_manager_ui(current_tickers: str = ""):
             with rm_col1:
                 if st.button("➖ Retirer la sélection", use_container_width=True):
                     st.session_state.builder_tickers = [t for t in st.session_state.builder_tickers if t not in remove_items]
-                    st.session_state.tickers_text = tickers_to_text(st.session_state.builder_tickers)
-                    st.session_state.selected_watchlist = "🧺 Liste en cours"
+                    st.session_state.pending_selected_watchlist = "🧺 Liste en cours"
+                    st.session_state.pending_tickers_text = tickers_to_text(st.session_state.builder_tickers)
                     st.rerun()
             with rm_col2:
                 if st.button("🧹 Vider la liste en cours", use_container_width=True):
                     st.session_state.builder_tickers = []
-                    st.session_state.tickers_text = ""
-                    st.session_state.selected_watchlist = "🧺 Liste en cours"
+                    st.session_state.pending_selected_watchlist = "🧺 Liste en cours"
+                    st.session_state.pending_tickers_text = ""
                     st.rerun()
         else:
             st.info("Ta liste en cours est vide. Ajoute une action au-dessus.")
@@ -1436,8 +1435,8 @@ def watchlist_manager_ui(current_tickers: str = ""):
                 st.error("Ta liste en cours est vide.")
             else:
                 st.session_state.custom_watchlists[name] = tickers_value
-                st.session_state.selected_watchlist = f"⭐ {name}"
-                st.session_state.tickers_text = tickers_value
+                st.session_state.pending_selected_watchlist = f"⭐ {name}"
+                st.session_state.pending_tickers_text = tickers_value
                 st.success(f"Watchlist '{name}' enregistrée.")
                 st.rerun()
 
@@ -1505,12 +1504,21 @@ with st.sidebar:
     all_watchlists = get_all_watchlists()
     options = list(all_watchlists.keys())
 
-    if "selected_watchlist" not in st.session_state or st.session_state.selected_watchlist not in options:
+    # IMPORTANT Streamlit : on ne modifie les valeurs de widgets AVANT leur création.
+    # Les boutons du manager créent des valeurs pending_*, appliquées ici au rerun suivant.
+    pending_selected = st.session_state.pop("pending_selected_watchlist", None)
+    pending_tickers = st.session_state.pop("pending_tickers_text", None)
+
+    if pending_selected and pending_selected in options:
+        st.session_state.selected_watchlist = pending_selected
+        st.session_state._last_watchlist = pending_selected
+        st.session_state.tickers_text = pending_tickers if pending_tickers is not None else all_watchlists[pending_selected]
+    elif "selected_watchlist" not in st.session_state or st.session_state.selected_watchlist not in options:
         st.session_state.selected_watchlist = options[0]
 
     preset = st.selectbox("Watchlist", options, key="selected_watchlist")
 
-    # Quand tu changes de watchlist, on remplit automatiquement la zone Tickers.
+    # Quand tu changes de watchlist manuellement, on remplit automatiquement la zone Tickers.
     if st.session_state.get("_last_watchlist") != preset:
         st.session_state.tickers_text = all_watchlists[preset]
         st.session_state._last_watchlist = preset
