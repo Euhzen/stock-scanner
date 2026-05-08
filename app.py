@@ -21,6 +21,7 @@ Disclaimer : outil d'analyse/éducation, pas un conseil financier.
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from dataclasses import dataclass
@@ -1332,6 +1333,167 @@ def paper_trading_ui():
 
 
 # =========================================================
+# WATCHLISTS PERSONNALISÉES
+# =========================================================
+
+if "custom_watchlists" not in st.session_state:
+    st.session_state.custom_watchlists = {}
+
+if "builder_tickers" not in st.session_state:
+    st.session_state.builder_tickers = []
+
+
+def unique_tickers(tickers: List[str]) -> List[str]:
+    """Nettoie une liste de tickers en gardant l'ordre et en supprimant les doublons."""
+    seen = set()
+    cleaned = []
+    for t in tickers:
+        t = str(t).strip().upper()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        cleaned.append(t)
+    return cleaned
+
+
+def tickers_to_text(tickers: List[str]) -> str:
+    return ", ".join(unique_tickers(tickers))
+
+
+def get_all_watchlists() -> Dict[str, str]:
+    """Combine les watchlists intégrées, la liste en cours et les watchlists créées dans l'app."""
+    builder_text = tickers_to_text(st.session_state.builder_tickers)
+    builder = {"🧺 Liste en cours": builder_text}
+    custom = {f"⭐ {name}": tickers for name, tickers in st.session_state.custom_watchlists.items()}
+    return {**PRESET_WATCHLISTS, **builder, **custom}
+
+
+def watchlist_manager_ui(current_tickers: str = ""):
+    """Interface pour créer une watchlist au fur et à mesure directement dans l'app."""
+    with st.expander("⭐ Créer / gérer mes watchlists", expanded=True):
+        st.caption(
+            "Tu peux ajouter des tickers un par un dans une liste en cours, puis l'enregistrer. "
+            "Sur Streamlit gratuit, télécharge le JSON pour la garder même après redémarrage de l'app."
+        )
+
+        st.markdown("#### 🧺 Liste en cours")
+
+        add_col1, add_col2 = st.columns([2, 1])
+        with add_col1:
+            ticker_to_add = st.text_input("Ajouter une action", placeholder="Ex : IREN, AMD, BBAI", key="ticker_to_add")
+        with add_col2:
+            st.write("")
+            if st.button("➕ Ajouter", use_container_width=True):
+                new_items = parse_tickers(ticker_to_add)
+                if not new_items:
+                    st.error("Entre au moins un ticker.")
+                else:
+                    st.session_state.builder_tickers = unique_tickers(st.session_state.builder_tickers + new_items)
+                    st.session_state.selected_watchlist = "🧺 Liste en cours"
+                    st.session_state.tickers_text = tickers_to_text(st.session_state.builder_tickers)
+                    st.session_state.ticker_to_add = ""
+                    st.success("Ticker ajouté à ta liste en cours.")
+                    st.rerun()
+
+        if st.button("📌 Ajouter la liste affichée à ma liste en cours", use_container_width=True):
+            st.session_state.builder_tickers = unique_tickers(st.session_state.builder_tickers + parse_tickers(current_tickers))
+            st.session_state.selected_watchlist = "🧺 Liste en cours"
+            st.session_state.tickers_text = tickers_to_text(st.session_state.builder_tickers)
+            st.rerun()
+
+        if st.session_state.builder_tickers:
+            st.markdown(" ".join([badge(t, "purple") for t in st.session_state.builder_tickers]), unsafe_allow_html=True)
+
+            remove_items = st.multiselect(
+                "Retirer des actions de la liste en cours",
+                st.session_state.builder_tickers,
+                key="remove_builder_tickers",
+            )
+            rm_col1, rm_col2 = st.columns(2)
+            with rm_col1:
+                if st.button("➖ Retirer la sélection", use_container_width=True):
+                    st.session_state.builder_tickers = [t for t in st.session_state.builder_tickers if t not in remove_items]
+                    st.session_state.tickers_text = tickers_to_text(st.session_state.builder_tickers)
+                    st.session_state.selected_watchlist = "🧺 Liste en cours"
+                    st.rerun()
+            with rm_col2:
+                if st.button("🧹 Vider la liste en cours", use_container_width=True):
+                    st.session_state.builder_tickers = []
+                    st.session_state.tickers_text = ""
+                    st.session_state.selected_watchlist = "🧺 Liste en cours"
+                    st.rerun()
+        else:
+            st.info("Ta liste en cours est vide. Ajoute une action au-dessus.")
+
+        st.markdown("#### 💾 Enregistrer la liste en cours")
+        save_name = st.text_input("Nom de la watchlist à enregistrer", placeholder="Ex : IA data centers", key="save_builder_name")
+        if st.button("💾 Enregistrer cette watchlist", use_container_width=True):
+            name = save_name.strip()
+            tickers_value = tickers_to_text(st.session_state.builder_tickers)
+            if not name:
+                st.error("Donne un nom à ta watchlist.")
+            elif not tickers_value:
+                st.error("Ta liste en cours est vide.")
+            else:
+                st.session_state.custom_watchlists[name] = tickers_value
+                st.session_state.selected_watchlist = f"⭐ {name}"
+                st.session_state.tickers_text = tickers_value
+                st.success(f"Watchlist '{name}' enregistrée.")
+                st.rerun()
+
+        st.markdown("#### 📦 Sauvegarde / import")
+        if st.session_state.custom_watchlists:
+            selected_delete = st.selectbox(
+                "Supprimer une watchlist enregistrée",
+                list(st.session_state.custom_watchlists.keys()),
+                key="delete_watchlist_select"
+            )
+            if st.button("🗑️ Supprimer cette watchlist", use_container_width=True):
+                st.session_state.custom_watchlists.pop(selected_delete, None)
+                st.success("Watchlist supprimée.")
+                st.rerun()
+
+            export_payload = {
+                "custom_watchlists": st.session_state.custom_watchlists,
+                "builder_tickers": st.session_state.builder_tickers,
+            }
+            export_data = json.dumps(export_payload, indent=2, ensure_ascii=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Télécharger mes watchlists",
+                data=export_data,
+                file_name="mes_watchlists_stock_scanner.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        else:
+            st.info("Aucune watchlist enregistrée pour l'instant. Ta liste en cours existe seulement dans cette session.")
+
+        uploaded = st.file_uploader("Importer mes watchlists JSON", type=["json"], key="watchlist_import")
+        if uploaded is not None:
+            try:
+                imported = json.loads(uploaded.getvalue().decode("utf-8"))
+                if isinstance(imported, dict) and "custom_watchlists" in imported:
+                    custom = imported.get("custom_watchlists", {})
+                    builder = imported.get("builder_tickers", [])
+                elif isinstance(imported, dict):
+                    custom = imported
+                    builder = []
+                else:
+                    custom = {}
+                    builder = []
+
+                cleaned = {str(k): str(v) for k, v in custom.items() if str(k).strip() and str(v).strip()}
+                if st.button("📥 Importer ce fichier", use_container_width=True):
+                    st.session_state.custom_watchlists.update(cleaned)
+                    if builder:
+                        st.session_state.builder_tickers = unique_tickers(builder)
+                    st.success("Watchlists importées.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Impossible de lire le fichier : {e}")
+
+
+# =========================================================
 # APP
 # =========================================================
 
@@ -1340,9 +1502,28 @@ render_hero()
 
 with st.sidebar:
     st.markdown("### ⚙️ Contrôle")
-    preset = st.selectbox("Watchlist prédéfinie", list(PRESET_WATCHLISTS.keys()))
-    raw_tickers = st.text_area("Tickers", value=PRESET_WATCHLISTS[preset], height=180)
+    all_watchlists = get_all_watchlists()
+    options = list(all_watchlists.keys())
+
+    if "selected_watchlist" not in st.session_state or st.session_state.selected_watchlist not in options:
+        st.session_state.selected_watchlist = options[0]
+
+    preset = st.selectbox("Watchlist", options, key="selected_watchlist")
+
+    # Quand tu changes de watchlist, on remplit automatiquement la zone Tickers.
+    if st.session_state.get("_last_watchlist") != preset:
+        st.session_state.tickers_text = all_watchlists[preset]
+        st.session_state._last_watchlist = preset
+
+    raw_tickers = st.text_area(
+        "Tickers",
+        height=180,
+        key="tickers_text",
+        help="Tu peux modifier cette zone à la main, ou construire une liste progressivement plus bas."
+    )
     tickers = parse_tickers(raw_tickers)
+
+    watchlist_manager_ui(raw_tickers)
 
     st.markdown("---")
     st.markdown("### 🎯 Filtres scan")
